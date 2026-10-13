@@ -11,6 +11,7 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/rtptime"
 	"github.com/bluenviron/gortsplib/v5/pkg/sdpunmarshaler"
 	"github.com/pion/rtp"
+	"github.com/pion/sdp/v3"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/counterdumper"
@@ -20,6 +21,7 @@ import (
 	"github.com/bluenviron/mediamtx/internal/packetdumper"
 	"github.com/bluenviron/mediamtx/internal/protocols/udp"
 	"github.com/bluenviron/mediamtx/internal/protocols/unix"
+	"github.com/bluenviron/mediamtx/internal/rtpext"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/unit"
 )
@@ -129,7 +131,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 
 	readerErr := make(chan error)
 	go func() {
-		readerErr <- s.runReader(&desc, nc)
+		readerErr <- s.runReader(&desc, sd, nc)
 	}()
 
 	for {
@@ -148,7 +150,7 @@ func (s *Source) Run(params defs.StaticSourceRunParams) error {
 	}
 }
 
-func (s *Source) runReader(desc *description.Session, nc net.Conn) error {
+func (s *Source) runReader(desc *description.Session, sd *sdp.SessionDescription, nc net.Conn) error {
 	packetsLost := &counterdumper.Dumper{
 		OnReport: func(val uint64) {
 			s.Log(logger.Warn, "%d RTP %s lost",
@@ -185,9 +187,23 @@ func (s *Source) runReader(desc *description.Session, nc net.Conn) error {
 	mediasByPayloadType := make(map[uint8]*rtpMedia)
 	formatsByPayloadType := make(map[uint8]*rtpFormat)
 
-	for _, descMedia := range desc.Medias {
+	for mediaIndex, descMedia := range desc.Medias {
 		rtpMedia := &rtpMedia{
 			desc: descMedia,
+		}
+
+		if mediaIndex < len(sd.MediaDescriptions) {
+			for _, attr := range sd.MediaDescriptions[mediaIndex].Attributes {
+				if attr.Key != "extmap" {
+					continue
+				}
+
+				id, uri, ok := rtpext.ParseExtMap(attr.Value)
+				if ok && uri == rtpext.FrameMetadataURI {
+					rtpMedia.frameMetadataExtensionID = id
+					break
+				}
+			}
 		}
 
 		for _, descFormat := range descMedia.Formats {
@@ -253,10 +269,19 @@ func (s *Source) runReader(desc *description.Session, nc net.Conn) error {
 				continue
 			}
 
-			subStream.WriteUnit(media.desc, forma.desc, &unit.Unit{
+			u := &unit.Unit{
 				PTS:        pts,
 				RTPPackets: []*rtp.Packet{pkt},
-			})
+			}
+
+			metadata := rtpext.ExtractFrameMetadata(pkt, media.frameMetadataExtensionID)
+			if metadata != nil {
+				u.RTPHeaderExtensions = map[string][]byte{
+					rtpext.FrameMetadataURI: metadata,
+				}
+			}
+
+			subStream.WriteUnit(media.desc, forma.desc, u)
 		}
 	}
 }

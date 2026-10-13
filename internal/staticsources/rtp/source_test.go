@@ -9,10 +9,12 @@ import (
 	"time"
 
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
+	pionrtp "github.com/pion/rtp"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/conf"
 	"github.com/bluenviron/mediamtx/internal/defs"
+	"github.com/bluenviron/mediamtx/internal/rtpext"
 	"github.com/bluenviron/mediamtx/internal/staticsources/rtp"
 	"github.com/bluenviron/mediamtx/internal/test"
 )
@@ -151,6 +153,68 @@ func TestSourceUDP(t *testing.T) {
 			reloadConf <- nil
 		})
 	}
+}
+
+func TestSourceUDPFrameMetadataExtension(t *testing.T) {
+	p := &test.StaticSourceParent{}
+	p.Initialize()
+	defer p.Close()
+
+	so := &rtp.Source{
+		ReadTimeout: conf.Duration(10 * time.Second),
+		Parent:      p,
+	}
+
+	ctx, ctxCancel := context.WithCancel(context.Background())
+	defer ctxCancel()
+	done := make(chan struct{})
+	defer func() { <-done }()
+
+	go func() {
+		so.Run(defs.StaticSourceRunParams{ //nolint:errcheck
+			Context:        ctx,
+			ResolvedSource: "udp+rtp://127.0.0.1:9014",
+			Conf: &conf.Path{
+				RTPSDP: "v=0\n" +
+					"o=- 123456789 123456789 IN IP4 127.0.0.1\n" +
+					"s=H264 Video Stream\n" +
+					"c=IN IP4 127.0.0.1\n" +
+					"t=0 0\n" +
+					"m=video 9014 RTP/AVP 96\n" +
+					"a=rtpmap:96 H264/90000\n" +
+					"a=fmtp:96 profile-level-id=42e01e;packetization-mode=1\n" +
+					"a=extmap:1 " + rtpext.FrameMetadataURI + "\n",
+			},
+		})
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	conn, err := net.Dial("udp", "127.0.0.1:9014")
+	require.NoError(t, err)
+	defer conn.Close()
+
+	metadata := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 99}
+	pkt := &pionrtp.Packet{
+		Header: pionrtp.Header{
+			Version:        2,
+			Marker:         true,
+			PayloadType:    96,
+			SequenceNumber: 1234,
+			Timestamp:      90000,
+			SSRC:           0x10203040,
+		},
+		Payload: []byte{0x65, 0x01},
+	}
+	require.NoError(t, pkt.SetExtension(1, metadata))
+	buf, err := pkt.Marshal()
+	require.NoError(t, err)
+	_, err = conn.Write(buf)
+	require.NoError(t, err)
+
+	u := <-p.Unit
+	require.Equal(t, metadata, u.RTPHeaderExtensions[rtpext.FrameMetadataURI])
 }
 
 func TestSourceUnixSocket(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"github.com/pion/webrtc/v4"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
+	"github.com/bluenviron/mediamtx/internal/rtpext"
 )
 
 const (
@@ -331,6 +332,21 @@ func (co *PeerConnection) Start() error {
 		func(s *statsInterceptor) {
 			co.statsInterceptor = s
 		},
+	)
+	if err != nil {
+		return err
+	}
+
+	// Register after the standard extensions so Pion can allocate a distinct ID
+	// without interfering with MID, RID or TWCC.
+	headerExtensionDirection := webrtc.RTPTransceiverDirectionRecvonly
+	if co.Publish {
+		headerExtensionDirection = webrtc.RTPTransceiverDirectionSendonly
+	}
+	err = mediaEngine.RegisterHeaderExtension(
+		webrtc.RTPHeaderExtensionCapability{URI: rtpext.FrameMetadataURI},
+		webrtc.RTPCodecTypeVideo,
+		headerExtensionDirection,
 	)
 	if err != nil {
 		return err

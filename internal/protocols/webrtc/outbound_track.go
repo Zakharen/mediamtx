@@ -15,6 +15,7 @@ type OutboundTrack struct {
 	Caps webrtc.RTPCodecCapability
 
 	track      *webrtc.TrackLocalStaticRTP
+	sender     *webrtc.RTPSender
 	ssrc       uint32
 	rtcpSender *rtpsender.Sender
 }
@@ -45,6 +46,7 @@ func (t *OutboundTrack) setup(p *PeerConnection) error {
 	if err != nil {
 		return err
 	}
+	t.sender = sender
 
 	t.ssrc = uint32(sender.GetParameters().Encodings[0].SSRC)
 
@@ -96,4 +98,40 @@ func (t *OutboundTrack) WriteRTPWithNTP(pkt *rtp.Packet, ntp time.Time) error {
 	t.rtcpSender.ProcessPacket(pkt, ntp, true)
 
 	return t.track.WriteRTP(pkt)
+}
+
+func (t *OutboundTrack) headerExtensionID(uri string) (uint8, bool) {
+	if t.sender == nil {
+		return 0, false
+	}
+
+	for _, ext := range t.sender.GetParameters().HeaderExtensions {
+		if ext.URI == uri && ext.ID > 0 && ext.ID <= 255 {
+			return uint8(ext.ID), true
+		}
+	}
+
+	return 0, false
+}
+
+// WriteRTPWithNTPAndExtensions writes a RTP packet and remaps URI-keyed header
+// extensions to the IDs negotiated for this WebRTC sender.
+func (t *OutboundTrack) WriteRTPWithNTPAndExtensions(
+	pkt *rtp.Packet,
+	ntp time.Time,
+	extensions map[string][]byte,
+) error {
+	for uri, payload := range extensions {
+		id, ok := t.headerExtensionID(uri)
+		if !ok {
+			continue
+		}
+
+		err := pkt.SetExtension(id, payload)
+		if err != nil {
+			return err
+		}
+	}
+
+	return t.WriteRTPWithNTP(pkt, ntp)
 }

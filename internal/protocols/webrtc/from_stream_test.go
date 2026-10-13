@@ -10,10 +10,12 @@ import (
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
 	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
 	"github.com/pion/rtp"
+	"github.com/pion/sdp/v3"
 	"github.com/stretchr/testify/require"
 
 	"github.com/bluenviron/mediamtx/internal/logger"
 	"github.com/bluenviron/mediamtx/internal/protocols/webrtc"
+	"github.com/bluenviron/mediamtx/internal/rtpext"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -85,6 +87,160 @@ func TestFromStream(t *testing.T) {
 			require.NoError(t, err)
 
 			require.Equal(t, ca.webrtcCaps, pc.OutboundTracks[0].Caps)
+		})
+	}
+}
+
+func extensionIDFromSDP(t *testing.T, raw string, targetURI string) uint8 {
+	var sd sdp.SessionDescription
+	require.NoError(t, sd.Unmarshal([]byte(raw)))
+
+	for _, media := range sd.MediaDescriptions {
+		if media.MediaName.Media != "video" {
+			continue
+		}
+		for _, attr := range media.Attributes {
+			if attr.Key != "extmap" {
+				continue
+			}
+			id, uri, ok := rtpext.ParseExtMap(attr.Value)
+			if ok && uri == targetURI {
+				return id
+			}
+		}
+	}
+
+	t.Fatalf("extension was not advertised: %s", targetURI)
+	return 0
+}
+
+func TestFromStreamFrameMetadata(t *testing.T) {
+	for _, ca := range []struct {
+		name    string
+		format  format.Format
+		payload unit.Payload
+	}{
+		{
+			name:   "H264",
+			format: test.FormatH264,
+			payload: unit.PayloadH264{
+				append([]byte{0x05}, make([]byte, 3000)...),
+			},
+		},
+		{
+			name:   "H265",
+			format: &format.H265{PayloadTyp: 96},
+			payload: unit.PayloadH265{
+				append([]byte{38, 1}, make([]byte, 3000)...),
+			},
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			desc := &description.Session{Medias: []*description.Media{{
+				Type:    description.MediaTypeVideo,
+				Formats: []format.Format{ca.format},
+			}}}
+			strm := &stream.Stream{
+				OrigDesc:          desc,
+				WriteQueueSize:    512,
+				RTPMaxPayloadSize: 1450,
+				Parent:            test.NilLogger,
+			}
+			require.NoError(t, strm.Initialize())
+			t.Cleanup(strm.Close)
+
+			subStream := &stream.SubStream{Stream: strm, UseRTPPackets: false}
+			require.NoError(t, subStream.Initialize())
+
+			readerPC := &webrtc.PeerConnection{
+				LocalRandomUDP: true, IPsFromInterfaces: true,
+				Publish: false, Log: test.NilLogger,
+			}
+			require.NoError(t, readerPC.Start())
+			t.Cleanup(readerPC.Close)
+
+			publisherPC := &webrtc.PeerConnection{
+				LocalRandomUDP: true, IPsFromInterfaces: true,
+				Publish: true, Log: test.NilLogger,
+			}
+			r := &stream.Reader{Parent: test.NilLogger}
+			require.NoError(t, webrtc.FromStream(desc, r, publisherPC))
+			require.NoError(t, publisherPC.Start())
+			t.Cleanup(publisherPC.Close)
+
+			offer, err := readerPC.CreatePartialOffer(false)
+			require.NoError(t, err)
+			outputID := extensionIDFromSDP(t, offer.SDP, rtpext.FrameMetadataURI)
+			require.NotEqual(t, uint8(1), outputID)
+			twccID := extensionIDFromSDP(t, offer.SDP,
+				"http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01")
+			require.NotEqual(t, outputID, twccID)
+
+			answer, err := publisherPC.CreateFullAnswer(offer, false)
+			require.NoError(t, err)
+			require.NoError(t, readerPC.SetAnswer(answer))
+			require.NoError(t, readerPC.WaitUntilConnected(10*time.Second))
+			require.NoError(t, publisherPC.WaitUntilConnected(10*time.Second))
+
+			strm.AddReader(r)
+			t.Cleanup(func() { strm.RemoveReader(r) })
+
+			writeUnit := func(pts int64, extensions map[string][]byte) {
+				subStream.WriteUnit(desc.Medias[0], ca.format, &unit.Unit{
+					PTS:                 pts,
+					NTP:                 time.Now(),
+					RTPHeaderExtensions: extensions,
+					Payload:             ca.payload,
+				})
+			}
+
+			writeUnit(0, nil)
+			require.NoError(t, readerPC.GatherInboundTracks(2*time.Second))
+			tracks := readerPC.InboundTracks()
+			require.Len(t, tracks, 1)
+
+			metadata := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 77}
+			done := make(chan struct{})
+			errCh := make(chan string, 1)
+			packetCount := 0
+			var targetTimestamp uint32
+			tracking := false
+			tracks[0].OnPacketRTP = func(pkt *rtp.Packet) {
+				got := pkt.GetExtension(outputID)
+				if !tracking {
+					if len(got) == 0 {
+						return
+					}
+					tracking = true
+					targetTimestamp = pkt.Timestamp
+				}
+				if pkt.Timestamp != targetTimestamp {
+					return
+				}
+				if string(got) != string(metadata) {
+					select {
+					case errCh <- fmt.Sprintf("packet %d has metadata %x", packetCount, got):
+					default:
+					}
+					return
+				}
+				packetCount++
+				if pkt.Marker {
+					close(done)
+				}
+			}
+			readerPC.StartReading()
+
+			writeUnit(90000, map[string][]byte{rtpext.FrameMetadataURI: metadata})
+
+			select {
+			case <-done:
+			case msg := <-errCh:
+				t.Fatal(msg)
+			case <-time.After(10 * time.Second):
+				t.Fatal("did not receive frame metadata")
+			}
+			require.Greater(t, packetCount, 1)
 		})
 	}
 }

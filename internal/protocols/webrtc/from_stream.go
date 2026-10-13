@@ -191,7 +191,7 @@ func setupVideoTrack(
 				for _, pkt := range packets {
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
 					pkt.Timestamp += u.RTPPackets[0].Timestamp
-					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+					track.WriteRTPWithNTPAndExtensions(pkt, ntp, u.RTPHeaderExtensions) //nolint:errcheck
 				}
 
 				return nil
@@ -238,7 +238,7 @@ func setupVideoTrack(
 				for _, pkt := range packets {
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
 					pkt.Timestamp += u.RTPPackets[0].Timestamp
-					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+					track.WriteRTPWithNTPAndExtensions(pkt, ntp, u.RTPHeaderExtensions) //nolint:errcheck
 				}
 
 				return nil
@@ -283,7 +283,7 @@ func setupVideoTrack(
 				for _, pkt := range packets {
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
 					pkt.Timestamp += u.RTPPackets[0].Timestamp
-					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+					track.WriteRTPWithNTPAndExtensions(pkt, ntp, u.RTPHeaderExtensions) //nolint:errcheck
 				}
 
 				return nil
@@ -339,7 +339,7 @@ func setupVideoTrack(
 				for _, pkt := range packets {
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
 					pkt.Timestamp += u.RTPPackets[0].Timestamp
-					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+					track.WriteRTPWithNTPAndExtensions(pkt, ntp, u.RTPHeaderExtensions) //nolint:errcheck
 				}
 
 				return nil
@@ -411,7 +411,7 @@ func setupVideoTrack(
 				for _, pkt := range packets {
 					ntp := u.NTP.Add(timestampToDuration(int64(pkt.Timestamp), 90000))
 					pkt.Timestamp += u.RTPPackets[0].Timestamp
-					track.WriteRTPWithNTP(pkt, ntp) //nolint:errcheck
+					track.WriteRTPWithNTPAndExtensions(pkt, ntp, u.RTPHeaderExtensions) //nolint:errcheck
 				}
 
 				return nil

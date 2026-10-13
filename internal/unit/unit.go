@@ -19,6 +19,10 @@ type Unit struct {
 	// RTP packets
 	RTPPackets []*rtp.Packet
 
+	// RTP header extension payloads, indexed by their stable SDP URI.
+	// Numeric IDs are transport-specific and are deliberately not stored here.
+	RTPHeaderExtensions map[string][]byte
+
 	// codec-dependent payload
 	Payload Payload
 }

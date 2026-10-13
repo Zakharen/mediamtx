@@ -5,9 +5,12 @@ import (
 
 	"github.com/bluenviron/gortsplib/v5/pkg/description"
 	"github.com/bluenviron/gortsplib/v5/pkg/format"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph264"
+	"github.com/bluenviron/gortsplib/v5/pkg/format/rtph265"
 	"github.com/pion/rtp"
 	"github.com/stretchr/testify/require"
 
+	"github.com/bluenviron/mediamtx/internal/rtpext"
 	"github.com/bluenviron/mediamtx/internal/stream"
 	"github.com/bluenviron/mediamtx/internal/test"
 	"github.com/bluenviron/mediamtx/internal/unit"
@@ -861,6 +864,76 @@ func TestRTPDecoder(t *testing.T) {
 
 			received := <-recv
 			require.Equal(t, ca.decoded, received.Payload)
+		})
+	}
+}
+
+func TestRTPDecoderAssociatesFrameMetadata(t *testing.T) {
+	for _, ca := range []struct {
+		name   string
+		format format.Format
+		encode func() ([]*rtp.Packet, error)
+	}{
+		{
+			name:   "H264",
+			format: &format.H264{PayloadTyp: 96, PacketizationMode: 1},
+			encode: func() ([]*rtp.Packet, error) {
+				enc := &rtph264.Encoder{PayloadType: 96, PayloadMaxSize: 20, PacketizationMode: 1}
+				if err := enc.Init(); err != nil {
+					return nil, err
+				}
+				return enc.Encode([][]byte{append([]byte{0x05}, make([]byte, 100)...)})
+			},
+		},
+		{
+			name:   "H265",
+			format: &format.H265{PayloadTyp: 96},
+			encode: func() ([]*rtp.Packet, error) {
+				enc := &rtph265.Encoder{PayloadType: 96, PayloadMaxSize: 20}
+				if err := enc.Init(); err != nil {
+					return nil, err
+				}
+				return enc.Encode([][]byte{append([]byte{38, 1}, make([]byte, 100)...)})
+			},
+		},
+	} {
+		t.Run(ca.name, func(t *testing.T) {
+			desc := &description.Session{Medias: []*description.Media{{Formats: []format.Format{ca.format}}}}
+			strm := &stream.Stream{
+				OrigDesc: desc, WriteQueueSize: 512, RTPMaxPayloadSize: 1450, Parent: test.NilLogger,
+			}
+			require.NoError(t, strm.Initialize())
+			defer strm.Close()
+
+			subStream := &stream.SubStream{Stream: strm, UseRTPPackets: true}
+			require.NoError(t, subStream.Initialize())
+
+			received := make(chan *unit.Unit)
+			r := &stream.Reader{}
+			r.OnData(desc.Medias[0], ca.format, func(u *unit.Unit) error {
+				if !u.NilPayload() {
+					received <- u
+				}
+				return nil
+			})
+			strm.AddReader(r)
+			defer strm.RemoveReader(r)
+
+			packets, err := ca.encode()
+			require.NoError(t, err)
+			require.Greater(t, len(packets), 1)
+
+			metadata := []byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 88}
+			for i, pkt := range packets {
+				u := &unit.Unit{RTPPackets: []*rtp.Packet{pkt}}
+				if i == 0 {
+					u.RTPHeaderExtensions = map[string][]byte{rtpext.FrameMetadataURI: metadata}
+				}
+				subStream.WriteUnit(desc.Medias[0], ca.format, u)
+			}
+
+			u := <-received
+			require.Equal(t, metadata, u.RTPHeaderExtensions[rtpext.FrameMetadataURI])
 		})
 	}
 }

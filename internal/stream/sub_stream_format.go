@@ -17,6 +17,36 @@ type subStreamFormat struct {
 	useRTPPackets bool
 
 	rtpDecoder rtpDecoder
+
+	pendingRTPTimestamp        *uint32
+	pendingRTPHeaderExtensions map[string][]byte
+}
+
+func cloneRTPHeaderExtensions(in map[string][]byte) map[string][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+
+	out := make(map[string][]byte, len(in))
+	for uri, payload := range in {
+		out[uri] = append([]byte(nil), payload...)
+	}
+	return out
+}
+
+func mergeRTPHeaderExtensions(dst map[string][]byte, src map[string][]byte) map[string][]byte {
+	if len(src) == 0 {
+		return dst
+	}
+	if dst == nil {
+		dst = make(map[string][]byte, len(src))
+	}
+	for uri, payload := range src {
+		if _, ok := dst[uri]; !ok {
+			dst[uri] = append([]byte(nil), payload...)
+		}
+	}
+	return dst
 }
 
 func (ssf *subStreamFormat) initialize() error {
@@ -106,10 +136,30 @@ func (ssf *subStreamFormat) writeUnitInner(u *unit.Unit) error {
 
 	if len(u.RTPPackets) != 0 {
 		if ssf.rtpDecoder != nil {
+			timestamp := u.RTPPackets[0].Timestamp
+			if ssf.pendingRTPTimestamp == nil || *ssf.pendingRTPTimestamp != timestamp {
+				ssf.pendingRTPTimestamp = new(uint32)
+				*ssf.pendingRTPTimestamp = timestamp
+				ssf.pendingRTPHeaderExtensions = nil
+			}
+
+			ssf.pendingRTPHeaderExtensions = mergeRTPHeaderExtensions(
+				ssf.pendingRTPHeaderExtensions,
+				u.RTPHeaderExtensions,
+			)
+
 			var err error
 			u.Payload, err = ssf.rtpDecoder.decode(u.RTPPackets[0])
 			if err != nil {
+				ssf.pendingRTPTimestamp = nil
+				ssf.pendingRTPHeaderExtensions = nil
 				return err
+			}
+
+			if !u.NilPayload() {
+				u.RTPHeaderExtensions = cloneRTPHeaderExtensions(ssf.pendingRTPHeaderExtensions)
+				ssf.pendingRTPTimestamp = nil
+				ssf.pendingRTPHeaderExtensions = nil
 			}
 		}
 
